@@ -79,6 +79,8 @@ taken to respond.
 # XXX: disallow requests originating from self.
 
 
+fludproto_ver = '0.1'
+
 challengelength = 40  # XXX: is 40 bytes sufficient?
 
 class ROOT(Resource):
@@ -86,14 +88,15 @@ class ROOT(Resource):
 	Notes on parameters common to most requests:
 	Ku_e - the public key RSA exponent (usually 65537L, but can be other values)
 	Ku_n - the public key RSA modulus.
+	nodeID - the nodeID of the requestor
 	port - the port that the reqestor runs their fludserver on.
 	
-	All REQs will contain a public key ('Ku_e', 'Ku_n') from which nodeID can
-	be derived, and a requestID ('reqID').  For the ops that don't require
-	authentication (currently ID and dht ops), it may be convenient to also
-	require nodeID (in this case, it is a good idea to check nodeID against
-	Ku). 
-	
+	All REQs will contain a nodeID ('nodeID'), a public key ('Ku_e', 'Ku_n'),
+	and a requestID ('reqID').	
+
+	[XXX: must be more careful about all this code -- if wrong data is sent,
+	exceptions are raised.  Put try blocks around everything.]
+
 	Client Authentication works as follows: Each client request is responded to
 	with a 401 response in the header, with a challenge in the header message
 	and repeated in the body.  The client reissues the response, filling the
@@ -106,14 +109,8 @@ class ROOT(Resource):
 	challenge response, the server has to keep some state for each client.
 	This state expires after a short time, and implies that client must make
 	requests to individual servers serially.
-
-	A node's groupIDu is the same globally for each peer, so exposing it to one
-	adversarial node means exposing it to all.  At first glance, this seems
-	bad, but groupIDu is useless by itself -- in order to use it, a node must
-	also be able to answer challenges based on Kr.  In other words, the
-	security of groupIDu in this setting depends on Kr.
 	"""
-	# XXX: web2 will let us do cool streaming things someday
+	# FUTURE: might want to switch to nevow's rend.Page as parent...
 
 	def __init__(self, fludserver):
 		"""
@@ -139,23 +136,18 @@ class ROOT(Resource):
 
 	def setHeaders(self, request):
 		request.setHeader('Server','FludServer 0.1')
-		request.setHeader('FludProtocol', PROTOCOL_VERSION)
+		request.setHeader('FludProtocol', fludproto_ver)
 
 
 class ID(ROOT):
-	""" self identification / kad ping """
-	def getChild(self, name, request):
-		return self
-
+	"""
+	Just received a request to expose my identity.  Send public key (from which
+	requestor can determine nodeID).
+	Response codes: 200- OK (default)
+	                204- No Content (returned in case of error or not wanting
+					     to divulge ID)
+	"""
 	def render_GET(self, request):
-		"""
-		Just received a request to expose my identity.  Send public key (from
-		which requestor can determine nodeID).
-		Response codes: 200- OK (default)
-						204- No Content (returned in case of error or not
-							 wanting to divulge ID)
-						400- Bad Request (missing params or bad requesting ID)
-		"""
 		self.setHeaders(request)
 		try:
 			required = ('nodeID', 'Ku_e', 'Ku_n', 'port')
@@ -174,9 +166,6 @@ class ID(ROOT):
 			reqKu['e'] = long(params['Ku_e'])
 			reqKu['n'] = long(params['Ku_n'])
 			reqKu = FludRSA.importPublicKey(reqKu)
-			if reqKu.id() != params['nodeID']:
-				request.setResponseCode(http.BAD_REQUEST, "Bad Identity")
-				return "requesting node's ID and public key do not match"
 			host = getCanonicalIP(request.getClientIP())
 			updateNode(self.node.client, self.config, host,
 					int(params['port']), reqKu, params['nodeID'])
@@ -187,124 +176,49 @@ class ID(ROOT):
 			#	request.setResponseCode(http.NO_CONTENT, msg)
 			#	return msg
 
-class FILE(ROOT):
-	""" data storage file operations: POST, GET, DELETE """
-	def getChild(self, name, request):
-		if len(request.prepath) != 2:
-			return Resource.getChild(self, name, request)
-		return self
 
+
+class STORE(ROOT):
+	"""
+	A request to store data via http upload.
+	Response codes: 200- OK (default)
+	                400- Bad Request (missing params) 
+	                401- Unauthorized (ID hash, CHALLENGE, or 
+					     GROUPCHALLENGE failed) 
+
+	Each file fragment is stored with its storage key as the file name.  The
+	file fragment can be 'touched' (or use last access time if supported) each
+	time it is verified or read, so that we have a way to record age (which
+	also allows a purge strategy).  Files are reference-listed (reference count
+	with owners) by the BlockFile object.
+
+	A preliminary file structure:
+	.flud/
+		store/
+			fragmenthash1
+			fragmenthash2
+			...
+		dht/
+			metadatahash1
+			metadatahash2
+			...
+		meta/
+			master
+			metadatahash1
+			metadatahash2
+			...
+		dl/
+		flud.conf
+		fludfile.conf
+		fludrules.init
+		flud.log
+
+	"""
+	isLeaf = True
 	def render_POST(self, request):
-		"""
-		A request to store data via http upload.  The file to delete is
-		indicated by the URL path, e.g. 
-		POST http://server:port/a35cd1339766ef209657a7b
-		Response codes: 200- OK (default)
-						400- Bad Request (missing params) 
-						401- Unauthorized (ID hash, CHALLENGE, or 
-							 GROUPCHALLENGE failed) 
-
-		Each file fragment is stored with its storage key as the file name.
-		The file fragment can be 'touched' (or use last access time if
-		supported) each time it is verified or read, so that we have a way to
-		record age (which also allows a purge strategy).  Files are
-		reference-listed (reference count with owners) by the BlockFile object.
-		"""
-		loggerstor.debug("file POST, %s", request.prepath)
-		filekey = request.prepath[1]
 		self.setHeaders(request)
-		return StoreFile(self.node, self.config, request, filekey).deferred
-
-	def render_GET(self, request):
-		"""
-		A request to retrieve data.  The file to retrieve is indicated by the
-		URL path, e.g. GET http://server:port/a35cd1339766ef209657a7b
-		Response codes: 200- OK (default)
-						400- Bad Request (missing params) 
-						401- Unauthorized (ID hash, CHALLENGE, or 
-							 GROUPCHALLENGE failed) 
-		"""
-		loggerstor.debug("file GET, %s", request.prepath)
-		filekey = request.prepath[1]
-		self.setHeaders(request)
-		return RetrieveFile(self.node, self.config, request, filekey).deferred
-
-	def render_DELETE(self, request):
-		"""
-		A request to delete data.  The file to delete is indicated by the URL
-		path, e.g. DELETE http://server:port/a35cd1339766ef209657a7b
-		Response codes: 200- OK (default)
-						400- Bad Request (missing params) 
-						401- Unauthorized (ID hash, CHALLENGE, or 
-							GROUPCHALLENGE failed, or nodeID doesn't own this
-							block) 
-		"""
-		loggerstor.debug("file DELETE, %s", request.prepath)
-		filekey = request.prepath[1]
-		self.setHeaders(request)
-		return DeleteFile(self.node, self.config, request, filekey).deferred
-
-class HASH(ROOT):
-	""" verification of data via challenge-response """
-	def getChild(self, name, request):
-		return self
-
-	def render_GET(self, request):
-		"""
-		Just received a storage VERIFY request.
-		Response codes: 200- OK (default)
-						400- Bad Request (missing params) 
-						401- Unauthorized (ID hash, CHALLENGE, or 
-							 GROUPCHALLENGE failed) 
-		
-		[VERIFY is the most important of the trust-building ops.  Issues:
-		  1) how often do we verify.
-			a) each file
-			  A) each block of each file
-		  2) proxying hurts trust (see PROXY below)
-		The answer to #1 is, ideally, we check every node who is storing for us
-		every quanta.  But doing the accounting for keeping track of who is
-		storing for us is heavy, so instead we just want to check all of our
-		files and hope that gives sufficient coverage, on average, of the nodes
-		we store to.  But we have to put some limits on this, and the limits
-		can't be imposed by the sender (since a greedy sender can just modify
-		this), so peer nodes have to do some throttling of these types of
-		requests.  But such throttling is tricky, as the requestor must
-		decrease trust when VERIFY ops fail.  Also, since we will just randomly
-		select from our files, such a throttling scheme will reduce our
-		accuracy as we store more and more data (we can only verify a smaller
-		percentage).  Peers could enforce limits as a ratio of total data
-		stored for a node, but then the peers could act maliciously by
-		artificially lowering this number.  In summary, if we don't enforce
-		limits, misbehaving nodes could flood VERIFY requests resulting in
-		effecitve DOS attack.  If we do enforce limits, we have to watch out
-		for trust wars where both nodes end up destroying all trust between
-		them.  Possible answer: set an agreed-upon threshold a priori.  This
-		could be a hardcoded limit, or (better) negotiated between node pairs.
-		If the requestor goes over this limit, he should understand that his
-		trust will be decreased by requestee.  If he doesn't understand this,
-		his trust *should* be decreased, and if he decreases his own trust in
-		us as well, we don't care -- he's misbehaving.]
-		"""
-		loggervrfy.debug("file VERIFY, %s", request.prepath)
-		if len(request.prepath) != 2:
-			# XXX: add support for sending multiple verify ops in a single
-			# request
-			request.setResponseCode(http.BAD_REQUEST, "expected filekey")
-			return "expected file/[filekey], got %s" % '/'.join(request.prepath)
-		filekey = request.prepath[1]
-		self.setHeaders(request)
-		return VerifyFile(self.node, self.config, request, filekey).deferred
-
-class StoreFile(object):
-	def __init__(self, node, config, request, filekey):
-		self.node = node
-		self.config = config
-		self.deferred = self.storeFile(request, filekey)
-
-	def storeFile(self, request, filekey):
 		try:
-			required = ('size', 'Ku_e', 'Ku_n', 'port')
+			required = ('filekey', 'size', 'nodeID', 'Ku_e', 'Ku_n', 'port')
 			params = requireParams(request, required)
 		except Exception, inst:
 			msg = inst.args[0] + " in request received by STORE" 
@@ -312,25 +226,26 @@ class StoreFile(object):
 			request.setResponseCode(http.BAD_REQUEST, "Bad Request")
 			return msg 
 		else:
+			loggerstor.info("received STORE request from %s..." 
+					% params['nodeID'][:10])
+
 			host = getCanonicalIP(request.getClientIP())
 			port = int(params['port'])
-			loggerstor.info("received STORE request from %s:%s", host, port)
-
 			requestedSize = int(params['size'])
 			reqKu = {}
 			reqKu['e'] = long(params['Ku_e'])
 			reqKu['n'] = long(params['Ku_n'])
 			reqKu = FludRSA.importPublicKey(reqKu)
-			nodeID = reqKu.id()
 
 			#if requestedSize > 10:
 			#	msg = "unwilling to enter into storage relationship"
 			#	request.setResponseCode(http.PAYMENT_REQUIRED, msg) 
 			#	return msg
 
-			return authenticate(request, reqKu, host, port, 
-					self.node.client, self.config,
-					self._storeFile, request, filekey, reqKu, nodeID)
+			return authenticate(request, reqKu, params['nodeID'], 
+					host, int(params['port']), self.node.client, self.config,
+					self._storeFile, request, params['filekey'], reqKu, 
+					params['nodeID'])
 
 	def _storeFile(self, request, filekey, reqKu, nodeID):
 		# [XXX: memory management is not happy here.  might want to look at
@@ -515,15 +430,20 @@ class StoreFile(object):
 		return "STORE request must be sent using POST"
 
 
-class RetrieveFile(object):
-	def __init__(self, node, config, request, filekey):
-		self.node = node
-		self.config = config
-		self.deferred = self.retrieveFile(request, filekey)
-
-	def retrieveFile(self, request, filekey):
+class RETRIEVE(ROOT):
+	"""
+	A request to retrieve data.  The file to retrieve is indicated by the URL
+	path, e.g. http://server:port/RETRIEVE/a35cd1339766ef209657a7b
+	Response codes: 200- OK (default)
+	                400- Bad Request (missing params) 
+	                401- Unauthorized (ID hash, CHALLENGE, or 
+					     GROUPCHALLENGE failed) 
+	"""
+	isLeaf = True
+	def render_GET(self, request):
+		self.setHeaders(request)
 		try:
-			required = ('Ku_e', 'Ku_n', 'port')
+			required = ('nodeID', 'Ku_e', 'Ku_n', 'port')
 			params = requireParams(request, required)
 		except Exception, inst:
 			msg = inst.args[0] + " in request received by RETRIEVE" 
@@ -531,10 +451,18 @@ class RetrieveFile(object):
 			request.setResponseCode(http.BAD_REQUEST, "Bad Request")
 			return msg 
 		else:
+			loggerretr.info("received RETRIEVE request for %s from %s..."
+					% (request.path, params['nodeID'][:10]))
 			host = getCanonicalIP(request.getClientIP())
 			port = int(params['port'])
-			loggerretr.info("received RETRIEVE request for %s from %s:%s...",
-					request.path, host, port)
+			filekey = re.sub('/RETRIEVE', '', str(request.path))
+			paths = [p for p in filekey.split(os.path.sep) if p != '']
+			if len(paths) > 1:
+				msg = "filekey contains illegal path seperator tokens."
+				loggerretr.debug("BAD_REQ: %s" % msg)
+				request.setResponseCode(http.BAD_REQUEST, 
+						"Bad Request: %s" % msg)
+				return msg
 			reqKu = {}
 			reqKu['e'] = long(params['Ku_e'])
 			reqKu['n'] = long(params['Ku_n'])
@@ -546,15 +474,16 @@ class RetrieveFile(object):
 			else:
 				returnMeta = True
 
-			return authenticate(request, reqKu, host, int(params['port']), 
-					self.node.client, self.config,
+			return authenticate(request, reqKu, params['nodeID'], 
+					host, int(params['port']), self.node.client, self.config,
 					self._sendFile, request, filekey, reqKu, returnMeta)
 			
 
 	def _sendFile(self, request, filekey, reqKu, returnMeta):
-		fname = os.path.join(self.config.storedir,filekey)
+		fname = self.config.storedir + filekey
 		loggerretr.debug("reading file data from %s" % fname)
 		# XXX: make sure requestor owns the file? 
+		tfilekey = filekey[1:]
 		if returnMeta:
 			loggerretr.debug("returnMeta = %s" % returnMeta)
 			request.setHeader('Content-type', 'Multipart/Related')
@@ -574,13 +503,13 @@ class RetrieveFile(object):
 			for tarball, openmode in tarballs:
 				tar = tarfile.open(tarball, openmode)
 				try:
-					tinfo = tar.getmember(filekey)
+					tinfo = tar.getmember(tfilekey)
 					returnedMeta = False
 					if returnMeta:
-						loggerretr.debug("tar returnMeta %s" % filekey)
+						loggerretr.debug("tar returnMeta %s" % tfilekey)
 						try:
 							metas = [f for f in tar.getnames()
-										if f[:len(filekey)] == filekey 
+										if f[:len(tfilekey)] == tfilekey 
 										and f[-4:] == 'meta']
 							loggerretr.debug("tar returnMetas=%s" % metas)
 							for m in metas:
@@ -610,7 +539,7 @@ class RetrieveFile(object):
 							H = []
 							H.append("--%s" % rand_bound)
 							H.append("Content-Type: Application/octet-stream")
-							H.append("Content-ID: %s" % filekey)
+							H.append("Content-ID: %s" % tfilekey)
 							H.append("Content-Length: %d" % tinfo.size)
 							H.append("")
 							H = '\r\n'.join(H)
@@ -658,7 +587,7 @@ class RetrieveFile(object):
 					H = []
 					H.append("--%s" % rand_bound)
 					H.append("Content-Type: Application/octet-stream")
-					H.append("Content-ID: %s.%s.meta" % (filekey, m))
+					H.append("Content-ID: %s.%s.meta" % (tfilekey, m))
 					H.append("Content-Length: %d" % len(meta[m]))
 					H.append("")
 					H.append(meta[m])
@@ -669,7 +598,7 @@ class RetrieveFile(object):
 				H = []
 				H.append("--%s" % rand_bound)
 				H.append("Content-Type: Application/octet-stream")
-				H.append("Content-ID: %s" % filekey)
+				H.append("Content-ID: %s" % tfilekey)
 				H.append("Content-Length: %d" % f.size())
 				H.append("")
 				H = '\r\n'.join(H)
@@ -699,14 +628,47 @@ class RetrieveFile(object):
 		request.finish()
 
 
-class VerifyFile(object):
-	def __init__(self, node, config, request, filekey):
-		self.node = node
-		self.config = config
-		self.deferred = self.verifyFile(request, filekey)
+class VERIFY(ROOT):
+	"""
+	Just received a storage VERIFY request.
+	Response codes: 200- OK (default)
+	                400- Bad Request (missing params) 
+	                401- Unauthorized (ID hash, CHALLENGE, or 
+					     GROUPCHALLENGE failed) 
+	
+	[VERIFY is the most important of the trust-building ops.  Issues:
+	  1) how often do we verify.
+	    a) each file
+		  A) each block of each file
+	  2) proxying hurts trust (see PROXY below)
+	The answer to #1 is, ideally, we check every node who is storing for us
+	every quanta.  But doing the accounting for keeping track of who is storing
+	for us is heavy, so instead we just want to check all of our files and hope
+	that gives sufficient coverage, on average, of the nodes we store to.  But
+	we have to put some limits on this, and the limits can't be imposed by the
+	sender (since a greedy sender can just modify this), so peer nodes have to
+	do some throttling of these types of requests.  But such throttling is
+	tricky, as the requestor must decrease trust when VERIFY ops fail.
+	Also, since we will just randomly select from our files, such a throttling
+	scheme will reduce our accuracy as we store more and more data (we can only
+	verify a smaller percentage).  Peers could enforce limits as a ratio of
+	total data stored for a node, but then the peers could act maliciously by
+	artificially lowering this number.
+	In summary, if we don't enforce limits, misbehaving nodes could flood 
+	VERIFY requests resulting in effecitve DOS attack.  If we do enforce
+	limits, we have to watch out for trust wars where both nodes end up
+	destroying all trust between them.
+	Possible answer: set an agreed-upon threshold a priori.  This could be
+	a hardcoded limit, or (better) negotiated between node pairs.  If the
+	requestor goes over this limit, he should understand that his trust will
+	be decreased by requestee.  If he doesn't understand this, his trust 
+	*should* be decreased, and if he decreases his own trust in us as well, we
+	don't care -- he's misbehaving.]
+	"""
+	# XXX: add support for sending multiple verify ops in a single request
 
 	isLeaf = True
-	def verifyFile(self, request, filekey):
+	def render_GET(self, request):
 		"""
 		A VERIFY contains a file[fragment]id, an offset, and a length.  
 		When this message is received, the given file[fragment] should be
@@ -721,8 +683,9 @@ class VerifyFile(object):
 		[should also enforce some idea of reasonableness on length of bytes
 		to verify]
 		"""
+		self.setHeaders(request)
 		try:
-			required = ('Ku_e', 'Ku_n', 'port', 'offset', 'length')
+			required = ('nodeID', 'Ku_e', 'Ku_n', 'port', 'offset', 'length')
 			params = requireParams(request, required)
 		except Exception, inst:
 			msg = inst.args[0] + " in request received by VERIFY" 
@@ -731,10 +694,8 @@ class VerifyFile(object):
 			loggervrfy.debug("BAD REQUEST")
 			return msg 
 		else:
-			host = getCanonicalIP(request.getClientIP())
-			port = int(params['port'])
-			loggervrfy.log(logging.INFO,
-					"received VERIFY request from %s:%s...", host, port)
+			loggervrfy.log(logging.INFO, "received VERIFY request from %s..."
+					% params['nodeID'])
 			if 'meta' in request.args:
 				params['metakey'] = request.args['metakey'][0]
 				params['meta'] = fdecode(request.args['meta'][0])
@@ -744,8 +705,11 @@ class VerifyFile(object):
 			else:
 				meta = None
 
+			host = getCanonicalIP(request.getClientIP())
+			port = int(params['port'])
 			offset = int(params['offset'])
 			length = int(params['length'])
+			filekey = re.sub('/VERIFY', '', str(request.path))
 			paths = [p for p in filekey.split(os.path.sep) if p != '']
 			if len(paths) > 1:
 				msg = "Bad request:"\
@@ -757,17 +721,16 @@ class VerifyFile(object):
 			reqKu['e'] = long(params['Ku_e'])
 			reqKu['n'] = long(params['Ku_n'])
 			reqKu = FludRSA.importPublicKey(reqKu)
-			nodeID = reqKu.id()
 
-			return authenticate(request, reqKu, host, port, 
-					self.node.client, self.config,
+			return authenticate(request, reqKu, params['nodeID'], 
+					host, int(params['port']), self.node.client, self.config,
 					self._sendVerify, request, filekey, offset, length, reqKu,
-					nodeID, meta)
+					params['nodeID'], meta)
 			
 						
 	def _sendVerify(self, request, filekey, offset, length, reqKu, nodeID, 
 			meta):
-		fname = os.path.join(self.config.storedir,filekey)
+		fname = self.config.storedir+filekey
 		loggervrfy.debug("request for %s" % fname)
 		if os.path.exists(fname):
 			loggervrfy.debug("looking in regular blockfile for %s" % fname)
@@ -789,8 +752,9 @@ class VerifyFile(object):
 				loggervrfy.debug("looking in tarball %s..." % tarball)
 				tar = tarfile.open(tarball, openmode)
 				try:
-					tarf = tar.extractfile(filekey)
-					tari = tar.getmember(filekey)
+					tfilekey = filekey[1:]
+					tarf = tar.extractfile(tfilekey)
+					tari = tar.getmember(tfilekey)
 					# XXX: update timestamp on tarf in tarball
 					fsize = tari.size
 					if offset > fsize or (offset+length) > fsize:
@@ -806,7 +770,7 @@ class VerifyFile(object):
 					data = tarf.read(length)
 					tarf.close()
 					if meta:
-						mfname = "%s.%s.meta" % (filekey, meta[0])
+						mfname = "%s.%s.meta" % (tfilekey, meta[0])
 						loggervrfy.debug("looking for %s" % mfname)
 						if mfname in tar.getnames():
 							# make sure that the data is the same, if not,
@@ -818,7 +782,7 @@ class VerifyFile(object):
 							if meta[1] != stored_meta:
 								loggervrfy.debug("updating tarball"
 										" metadata for %s.%s" 
-										% (filekey, meta[0]))
+										% (tfilekey, meta[0]))
 								tar.close()
 								TarfileUtils.delete(tarball, mfname)
 								if openmode == 'r:gz':
@@ -836,11 +800,11 @@ class VerifyFile(object):
 							else:
 								loggervrfy.debug("no need to update tarball"
 										" metadata for %s.%s" 
-										% (filekey, meta[0]))
+										% (tfilekey, meta[0]))
 						else:
 							# add it
 							loggervrfy.debug("adding tarball metadata"
-									" for %s.%s" % (filekey, meta[0]))
+									" for %s.%s" % (tfilekey, meta[0]))
 							tar.close()
 							if openmode == 'r:gz':
 								tarball = TarfileUtils.gunzipTarball(tarball)
@@ -897,15 +861,20 @@ class VerifyFile(object):
 		request.finish()
 
 
-class DeleteFile(object):
-	def __init__(self, node, config, request, filekey):
-		self.node = node
-		self.config = config
-		self.deferred = self.deleteFile(request, filekey)
-
-	def deleteFile(self, request, filekey):
+class DELETE(ROOT):
+	"""
+	A request to delete data.  The file to delete is indicated by the URL
+	path, e.g. http://server:port/DELETE/a35cd1339766ef209657a7b
+	Response codes: 200- OK (default)
+	                400- Bad Request (missing params) 
+	                401- Unauthorized (ID hash, CHALLENGE, or GROUPCHALLENGE 
+						failed, or nodeID doesn't own this block) 
+	"""
+	isLeaf = True
+	def render_GET(self, request):
+		self.setHeaders(request)
 		try:
-			required = ('Ku_e', 'Ku_n', 'port', 'metakey')
+			required = ('nodeID', 'Ku_e', 'Ku_n', 'port', 'metakey')
 			params = requireParams(request, required)
 		except Exception, inst:
 			msg = inst.args[0] + " in request received by DELETE" 
@@ -913,24 +882,32 @@ class DeleteFile(object):
 			request.setResponseCode(http.BAD_REQUEST, "Bad Request")
 			return msg 
 		else:
+			loggerdele.debug("received DELETE request for %s from %s..."
+					% (request.path, params['nodeID'][:10]))
+
 			host = getCanonicalIP(request.getClientIP())
 			port = int(params['port'])
-			loggerdele.debug("received DELETE request for %s from %s:%s"
-					% (request.path, host, port))
-
+			filekey = re.sub('/DELETE', '', str(request.path))
+			paths = [p for p in filekey.split(os.path.sep) if p != '']
+			if len(paths) > 1:
+				msg = "filekey contains illegal path seperator tokens."
+				loggerretr.debug("BAD_REQ: %s" % msg)
+				request.setResponseCode(http.BAD_REQUEST, 
+						"Bad Request: %s" % msg)
+				return msg
 			reqKu = {}
 			reqKu['e'] = long(params['Ku_e'])
 			reqKu['n'] = long(params['Ku_n'])
 			reqKu = FludRSA.importPublicKey(reqKu)
-			nodeID = reqKu.id()
 			metakey = params['metakey']
 
-			return authenticate(request, reqKu, host, port, 
-					self.node.client, self.config,
-					self._deleteFile, request, filekey, metakey, reqKu, nodeID)
+			return authenticate(request, reqKu, params['nodeID'], 
+					host, int(params['port']), self.node.client, self.config,
+					self._deleteFile, request, filekey, metakey, reqKu, 
+					params['nodeID'])
 
 	def _deleteFile(self, request, filekey, metakey, reqKu, reqID):
-		fname = os.path.join(self.config.storedir, filekey)
+		fname = self.config.storedir + filekey
 		loggerdele.debug("reading file data from %s" % fname)
 		if not os.path.exists(fname):
 			# check for tarball for originator
@@ -941,7 +918,8 @@ class DeleteFile(object):
 			if os.path.exists(tarballbase):
 				tarballs.append((tarballbase, 'r'))
 			for tarball, openmode in tarballs:
-				mfilekey = "%s.%s.meta" % (filekey, metakey)
+				tfilekey = filekey[1:]
+				mfilekey = "%s.%s.meta" % (tfilekey, metakey)
 				loggerdele.debug("opening %s, %s for delete..." 
 						% (tarball, openmode))
 				ftype = os.popen('file %s' % tarball)
@@ -949,12 +927,12 @@ class DeleteFile(object):
 				ftype.close()
 				tar = tarfile.open(tarball, openmode)
 				mnames = [n for n in tar.getnames() 
-						if n[:len(filekey)] == filekey]
+						if n[:len(tfilekey)] == tfilekey]
 				tar.close()
 				if len(mnames) > 2:
 					deleted = TarfileUtils.delete(tarball, mfilekey)
 				else:
-					deleted = TarfileUtils.delete(tarball, [filekey, mfilekey])
+					deleted = TarfileUtils.delete(tarball, [tfilekey, mfilekey])
 				if deleted:
 					loggerdele.info("DELETED %s (from %s)" % (deleted, tarball))
 				return ""
@@ -1004,7 +982,6 @@ class PROXY(ROOT):
 	charge a fee on the priority, reducing it by a small amount as they
 	forward the request.]
 	"""
-	# XXX: needs to be RESTified when implemented
 
 	isLeaf = True
 	def render_GET(self, request):
@@ -1012,12 +989,19 @@ class PROXY(ROOT):
 		result = "NOT YET IMPLEMENTED"
 		return result
 	
-def authenticate(request, reqKu, host, port, client, config, callable, 
+def authenticate(request, reqKu, reqID, host, port, client, config, callable, 
 		*callargs):
 	# 1- make sure that reqKu hashes to reqID
 	# 2- send a challenge/groupchallenge to reqID (encrypt with reqKu)
 	challengeResponse = request.getUser()
 	groupResponse = request.getPassword()
+	if reqKu.id() != reqID:
+		msg = "Ku %s does not hash to nodeID %s, failing request" \
+				% (reqKu.id(), reqID)
+		loggerauth.info(msg)
+		# XXX: update trust, routing
+		request.setResponseCode(http.UNAUTHORIZED, "Unauthorized: %s" % msg)
+		return msg
 
 	if not challengeResponse or not groupResponse:
 		loggerauth.info("returning challenge for request from %s:%d" \
@@ -1029,7 +1013,7 @@ def authenticate(request, reqKu, host, port, client, config, callable,
 			if groupResponse == hashstring(
 					str(reqKu.exportPublicKey())
 					+str(config.groupIDr)): 
-				updateNode(client, config, host, port, reqKu, reqKu.id())
+				updateNode(client, config, host, port, reqKu, reqID)
 				return callable(*callargs)
 			else:
 				err = "Group Challenge Failed"

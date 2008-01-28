@@ -5,7 +5,7 @@ the terms of the GNU General Public License (the GPL), version 3.
 manages configuration file for flud backup.
 """
 
-import os, sys, socket, re, logging, time
+import os, sys, socket, re, logging
 import ConfigParser
 
 import flud.FludCrypto as FludCrypto
@@ -13,33 +13,36 @@ from flud.FludCrypto import FludRSA
 from flud.FludkRouting import kRouting
 from flud.fencode import fencode, fdecode
 
+""" default mapping of relative URLs """
+def_commandmap = {
+		'ID': 'ID', 
+		'GROUPID': 'GROUPID',
+		'STORE': 'STORE', 
+		'RETRIEVE': 'RETRIEVE',
+		'VERIFY': 'VERIFY',
+		'PROXY': 'PROXY', 
+		'DELETE': 'DELETE', 
+		'kFINDNODE': 'kFINDNODE',
+		'kFINDVAL': 'kFINDVAL',
+		'kSTORE': 'kSTORE'
+}
+
 logger = logging.getLogger('flud')
 
 CLIENTPORTOFFSET = 500
 
-""" default mapping of trust deltas """
-class TrustDeltas:
-	INITIAL_SCORE = 1
-	POSITIVE_CAP = 500
-	NEGATIVE_CAP = -500
-	MAX_INC_PERDAY = 100 # XXX: currently unused
-	MAX_DEC_PERDAY = -250
-	# note: the rest of these are classes so that we can pass them around kind
-	# of like enums (identify what was passed by type, instead of by value)
-	class PUT_SUCCEED:
-		value = 2
-	class GET_SUCCEED:
-		value = 4
-	class VRFY_SUCCEED:
-		value = 4
-	class FNDN_FAIL:
-		value = -1
-	class PUT_FAIL:
-		value = -2
-	class GET_FAIL:
-		value = -10
-	class VRFY_FAIL:
-		value = -10
+def_trustdeltas = {
+		'NODE_INITIAL_SCORE': 1,
+		'NODE_POSITIVE_CAP': 100,
+		'NODE_NEGATIVE_CAP': -100,
+		'PUT_SUCCEED_REWARD': 2,
+		'GET_SUCCEED_REWARD': 4,
+		'VRFY_SUCCEED_REWARD': 4,
+		'FNDN_FAIL_PENALTY': -1,
+		'PUT_FAIL_PENALTY': -2,
+		'GET_FAIL_PENALTY': -10,
+		'VRFY_FAIL_PENALTY': -10
+}
 
 class FludDebugLogFilter(logging.Filter):
 	"""
@@ -110,9 +113,10 @@ class FludConfig:
 		self.groupIDr = 0
 		self.groupIDu = 0
 		self.port = -1
+		self.commandmap = {}
+		self.trustdeltas = {}
 		self.reputations = {}
 		self.nodes = {}
-		self.throttled = {}  # XXX: should persist this to config file
 
 		try:
 			self.fludhome = os.environ['FLUDHOME']
@@ -124,12 +128,12 @@ class FludConfig:
 				logger.warn("cannot determine FLUDHOME.")
 				logger.warn("Please set HOME or FLUDHOME environment variable")
 
-		if not os.path.isdir(self.fludhome):
+		if os.path.isdir(self.fludhome) == False:
 			os.mkdir(self.fludhome, 0700)
 
 		self.fludconfig = self.fludhome+"/flud.conf"
 		self.configParser = ConfigParser.ConfigParser()
-		if not os.path.isfile(self.fludconfig):
+		if os.path.isfile(self.fludconfig) == False:
 			conffile = file(self.fludconfig, "w")
 		else:
 			conffile = file(self.fludconfig, "r")
@@ -173,7 +177,8 @@ class FludConfig:
 		logger.debug('groupIDr = %s' % self.groupIDr)
 		logger.debug('groupIDu = %s' % self.groupIDu)
 		
-		self.port, self.clientport = self._getServerConf()
+		self.port, self.clientport, self.commandmap, self.trustdeltas \
+				= self._getServerConf()
 		if serverport != None:
 			self.port = serverport
 			self.clientport = serverport + CLIENTPORTOFFSET
@@ -181,32 +186,31 @@ class FludConfig:
 			self.configParser.set("server","clientport",self.clientport)
 		logger.debug('port = %s' % self.port)
 		logger.debug('clientport = %s' % self.clientport)
-		logger.debug('trustdeltas = %s' 
-				% [v for v in dir(TrustDeltas) if v[0] != '_'])
+		logger.debug('commandmap = %s' % self.commandmap)
 
 		self.routing = kRouting((socket.getfqdn(), self.port,
 				long(self.nodeID, 16), self.Ku.exportPublicKey()['n']))
 
 		self.storedir, self.generosity, self.minoffer = self._getStoreConf()
-		if not os.path.isdir(self.storedir):
+		if os.path.isdir(self.storedir) == False:
 			os.mkdir(self.storedir)
 			os.chmod(self.storedir, 0700)
 		logger.debug('storedir = %s' % self.storedir)
 
 		self.kstoredir = self._getkStoreConf()
-		if not os.path.isdir(self.kstoredir):
+		if os.path.isdir(self.kstoredir) == False:
 			os.mkdir(self.kstoredir)
 			os.chmod(self.kstoredir, 0700)
 		logger.debug('kstoredir = %s' % self.kstoredir)
 
 		self.clientdir = self._getClientConf()
-		if not os.path.isdir(self.clientdir):
+		if os.path.isdir(self.clientdir) == False:
 			os.mkdir(self.clientdir)
 			os.chmod(self.clientdir, 0700)
 		logger.debug('clientdir = %s' % self.clientdir)
 
 		self.metadir, self.metamaster = self._getMetaConf()
-		if not os.path.isdir(self.metadir):
+		if os.path.isdir(self.metadir) == False:
 			os.mkdir(self.metadir)
 			os.chmod(self.metadir, 0700)
 		logger.debug('metadir = %s' % self.metadir)
@@ -234,7 +238,7 @@ class FludConfig:
 		"""
 		Returns logging configuration: logfile and loglevel 
 		"""
-		if not self.configParser.has_section("logging"):
+		if (self.configParser.has_section("logging") == False):
 			self.configParser.add_section("logging")
 		
 		try:
@@ -264,7 +268,7 @@ class FludConfig:
 		# get the keys and IDs from the config file.
 		# If these values don't exist, generate a pub/priv key pair, nodeID,
 		# and groupIDs.
-		if not self.configParser.has_section("identification"):
+		if (self.configParser.has_section("identification") == False):
 			self.configParser.add_section("identification")
 		
 		try:
@@ -311,7 +315,7 @@ class FludConfig:
 		"""
 		Returns server configuration: port number
 		"""
-		if not self.configParser.has_section("server"):
+		if (self.configParser.has_section("server") == False):
 			self.configParser.add_section("server")
 		
 		try:
@@ -327,16 +331,34 @@ class FludConfig:
 			logger.debug("no clientport specified, using default")
 			clientport = port+CLIENTPORTOFFSET 
 		
+		try:
+			commandmap = eval(self.configParser.get("server","commandmap"))
+		except:
+			logger.debug("no commandmap specified, using default")
+			commandmap = def_commandmap
+		for i in def_commandmap: # ensure that commandmap covers all keys
+			if not commandmap.has_key(i):
+				commandmap[i] = def_commandmap[i]
+
+		trustdeltas = {}
+		for i in def_trustdeltas:
+			if not trustdeltas.has_key(i):
+				trustdeltas[i] = def_trustdeltas[i]
+
+
+		# XXX: could also do a 'parammap'
+
 		self.configParser.set("server","port",port)
 		self.configParser.set("server","clientport",clientport)
+		self.configParser.set("server","commandmap",commandmap)
 
-		return port, clientport
+		return port, clientport, commandmap, trustdeltas
 
 	def _getDirConf(self, configParser, section, default):
 		"""
 		Returns directory configuration
 		"""
-		if not configParser.has_section(section):
+		if (configParser.has_section(section) == False):
 			configParser.add_section(section)
 		
 		try:
@@ -356,21 +378,6 @@ class FludConfig:
 		"""
 		Returns client configuration: download directory 
 		"""
-		try:
-			trustdeltas = eval(self.configParser.get("client","trustdeltas"))
-			for i in trustdeltas:
-				if not hasattr(TrustDeltas, i):
-					logger.error("setting non-useful TrustDelta field %s", i)
-				setattr(TrustDeltas, i, trustdeltas[i])
-		except:
-			logger.debug("no trustdeltas specified, using default")
-
-		if not self.configParser.has_section("client"):
-			self.configParser.add_section("client")
-		self.configParser.set("client", "trustdeltas",
-				dict((v, eval("TrustDeltas.%s" % v)) for v in dir(TrustDeltas)
-					if v[0] != '_'))
-
 		return self._getDirConf(self.configParser, "client", "dl") 
 
 	def _getStoreConf(self):
@@ -442,7 +449,7 @@ class FludConfig:
 		the config file's "=" operator be a valid python type, as eval()
 		will be invoked on it
 		"""
-		if not configParser.has_section(section):
+		if (configParser.has_section(section) == False):
 			configParser.add_section(section)
 		
 		try:
@@ -470,7 +477,7 @@ class FludConfig:
 		"""
 		if mygroup == None:
 			mygroup = self.groupIDu
-		if not self.nodes.has_key(nodeID):
+		if self.nodes.has_key(nodeID) == False:
 			self.nodes[nodeID] = {'host': host, 'port': port, 
 					'Ku': Ku.exportPublicKey(), 'mygroup': mygroup}
 			#logger.log(logging.DEBUG, "nodes: " % str(self.nodes))
@@ -488,45 +495,31 @@ class FludConfig:
 				self.routing.replacementCache.insertNode(
 						(host, int(port), long(nodeID, 16),
 							Ku.exportPublicKey()['n']))
-			self.reputations[long(nodeID,16)] = TrustDeltas.INITIAL_SCORE
+			self.reputations[long(nodeID,16)] \
+					= self.trustdeltas['NODE_INITIAL_SCORE']
 			# XXX: no management of reputations size: need to manage as a cache
 	
-	def modifyReputation(self, nodeID, reason):
+	def modifyReputation(self, nodeID, delta):
 		"""
-		change reputation of nodeID by reason.value
+		change reputation of nodeID by delta
 		"""
-		logger.info("modify %s %s" % (nodeID, reason.value))
+		logger.info("modify %s %s" % (nodeID, delta))
 		if isinstance(nodeID, str):
 			nodeID = long(nodeID,16)
 		if not self.reputations.has_key(nodeID):
-			self.reputations[nodeID] = TrustDeltas.INITIAL_SCORE
+			self.reputations[nodeID] \
+					= self.trustdeltas['NODE_INITIAL_SCORE']
 			# XXX: no management of reputations size: need to manage as a cache
-		self.reputations[nodeID] += reason.value
+		self.reputations[nodeID] += delta
 		logger.debug("reputation for %d now %d", nodeID, 
 				self.reputations[nodeID])
-		curtime = int(time.time())
-		if reason.value < 0:
-			self.throttleNode(nodeID, reason, curtime)
-		elif nodeID in self.throttled and self.throttled[nodeID] < curtime:
-			self.throttled.pop(nodeID)
-
-	def throttleNode(self, nodeID, reason, curtime=None):
-		"""
-		puts a node in the throttle list.
-		"""
-		if not curtime:
-			curtime = int(time.time())
-		pause = curtime \
-				+ (reason.value * 24 * 60 * 60) / TrustDeltas.MAX_DEC_PERDAY
-		self.throttled[nodeID] = pause 
-
-	def getPreferredNodes(self, num=None, exclude=None, throttle=False):
+	
+	def getOrderedNodes(self, num=None, exclude=None):
 		"""
 		Get nodes ordered by reputation.  If num is passed in, return the first
 		'num' nodes, otherwise all.  If exclude list is passed in, try to
 		return nodes not on this list (but do return some excluded if nodes are
-		exhausted, i.e., there aren't num nodes available).  If throttle
-		(default), do not return any nodes which are currently throttled.
+		exhausted, i.e., there aren't num nodes available).
 		"""
 		# XXX: O(n) each time this is called.  Better performance if we
 		# maintain sorted list when modified (modifyReputation, addNode), at a
@@ -534,36 +527,14 @@ class FludConfig:
 		items = self.reputations.items()
 		numitems = len(items)
 		logger.debug("%d items in reps" % numitems)
-		if throttle:
-
-			now = int(time.time())
-			for t in self.throttled:
-				if self.throttled[t] < now:
-					self.throttled.pop(t)
-
-			if exclude:
-				items = [(v,k) for (k,v) in items if k not in throttle and 
-						k not in exclude]
-				if num and len(items) < num and numitems >= num:
-					exitems = [(v,k) for (k,v) in items if k not in throttle 
-							and k in exclude]
-					items += exitems[num-len(item):]
-				logger.debug("%d items now in reps" % len(items))
-			else:
-				items = [(v,k) for (k,v) in items if k not in throttle]
-		
+		if exclude:
+			items = [(v,k) for (k,v) in items if k not in exclude]
+			if num and len(items) < num and numitems >= num:
+				exitems = [(v,k) for (k,v) in items if k in exclude]
+				items += exitems[num-len(item):]
+			logger.debug("%d items now in reps" % len(items))
 		else:
-			# XXX: refactor; 'if exclude else' is same as above, but without
-			# the 'if k not in throttle' bits
-			if exclude:
-				items = [(v,k) for (k,v) in items if k not in exclude]
-				if num and len(items) < num and numitems >= num:
-					exitems = [(v,k) for (k,v) in items if k in exclude]
-					items += exitems[num-len(item):]
-				logger.debug("%d items now in reps" % len(items))
-			else:
-				items = [(v,k) for (k,v) in items]
-
+			items = [(v,k) for (k,v) in items]
 		items.sort()
 		items.reverse()
 		items = [(k,v) for (v,k) in items]

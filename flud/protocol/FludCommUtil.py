@@ -17,7 +17,7 @@ from flud.HTTPMultipartDownloader import HTTPMultipartDownloader
 """
 Some constants used by the Flud Protocol classes
 """
-PROTOCOL_VERSION = '0.2'
+fludproto_ver = '0.1'
 # XXX: when things timeout, bad news.  Unintuitive exceptions spewed.  Make this
 #      small and fix all issues.
 primitive_to = 3800	# default timeout for primitives

@@ -33,12 +33,16 @@ class FludServer(threading.Thread):
 		self.clientport = node.config.clientport
 		self.logger = node.logger
 		self.root = ROOT(self)
-		self.root.putChild('ID', ID(self))     # GET (node identity)
-		self.root.putChild('file', FILE(self)) # POST, GET, and DELETE (files)
-		self.root.putChild('hash', HASH(self)) # GET (verify op)
-		self.root.putChild('proxy', PROXY(self)) # currently noop
-		self.root.putChild('nodes', NODES(self))
-		self.root.putChild('meta', META(self))
+		commandmap = node.config.commandmap
+		self.root.putChild(commandmap['ID'], ID(self))
+		self.root.putChild(commandmap['STORE'], STORE(self))
+		self.root.putChild(commandmap['RETRIEVE'], RETRIEVE(self))
+		self.root.putChild(commandmap['VERIFY'], VERIFY(self))
+		self.root.putChild(commandmap['PROXY'], PROXY(self))
+		self.root.putChild(commandmap['DELETE'], DELETE(self))
+		self.root.putChild(commandmap['kFINDNODE'], kFINDNODE(self))
+		self.root.putChild(commandmap['kFINDVAL'], kFINDVAL(self))
+		self.root.putChild(commandmap['kSTORE'], kSTORE(self))
 		self.site = server.Site(self.root)
 		reactor.listenTCP(self.port, self.site)
 		reactor.listenTCP(self.clientport, LocalFactory(node), 
