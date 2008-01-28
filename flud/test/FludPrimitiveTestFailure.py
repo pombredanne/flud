@@ -43,12 +43,13 @@ def testUnexpectedSuccess(res, message, node):
 	raise "bad"
 
 def testDELETEBadKeyFailed(failure, msg, node, nKu, host, port):
-	if failure.check('flud.protocol.FludCommUtil.NotFoundException'):
+	if failure.check('flud.protocol.FludCommUtil.BadRequestException'):
 		print "%s" % msg
 		# the end
 	else:
-		print "\nDELETEBadKey expected NotFoundException," \
-				" but got a different failure:"
+		# XXX: here and elsewhere, raise something more descriptive, otherwise
+		# its waay confusing
+		print "the following trace may be misleading..."
 		raise failure
 
 def testDELETEBadKey(nKu, node, host, port):
@@ -66,8 +67,6 @@ def testVERIFYBadKeyFailed(failure, msg, node, nKu, host, port):
 		print "%s" % msg
 		return testDELETEBadKey(nKu, node, host, port)
 	else:
-		print "\nVERIFYBadKey expected NotFoundException," \
-				" but got a different failure:"
 		raise failure
 
 def testVERIFYBadKey(nKu, node, host, port):
@@ -87,8 +86,6 @@ def testVERIFYBadLengthFailed(failure, msg, node, nKu, host, port):
 		print "%s" % msg
 		return testVERIFYBadKey(nKu, node, host, port)
 	else:
-		print "\nVERIFYBadLength expected BadRequestException," \
-				" but got a different failure:"
 		raise failure
 
 def testVERIFYBadLength(nKu, node, host, port):
@@ -107,8 +104,7 @@ def testVERIFYBadOffsetFailed(failure, msg, node, nKu, host, port):
 		print "%s" % msg
 		return testVERIFYBadLength(nKu, node, host, port)
 	else:
-		print "\nVERIFYBadOffset expected BadRequestException," \
-				" but got a different failure:"
+		print "VERIFYBadOffset failed as expected, but with wrong failure"
 		raise failure
 
 def testVERIFYBadOffset(nKu, node, host, port):
@@ -127,8 +123,6 @@ def testVERIFYNotFoundFailed(failure, msg, node, nKu, host, port):
 		print "%s" % msg
 		return testVERIFYBadOffset(nKu, node, host, port)
 	else:
-		print "\nVERIFYNotFound expected NotFoundException," \
-				" but got a different failure:"
 		raise failure
 
 def testVERIFYNotFound(nKu, node, host, port):
@@ -142,12 +136,10 @@ def testVERIFYNotFound(nKu, node, host, port):
 	return deferred
 
 def testRETRIEVEIllegalPathFailed(failure, msg, node, nKu, host, port):
-	if failure.check('flud.protocol.FludCommUtil.NotFoundException'):
+	if failure.check('flud.protocol.FludCommUtil.BadRequestException'):
 		print "%s" % msg
 		return testVERIFYNotFound(nKu, node, host, port)
 	else:
-		print "\nRETRIEVEIllegalPath expected NotFoundException," \
-				" but got a different failure:"
 		raise failure
 
 def testRETRIEVEIllegalPath(nKu, node, host, port):
@@ -166,8 +158,6 @@ def testRETRIEVENotFoundFailed(failure, msg, node, nKu, host, port):
 		print "%s" % msg
 		return testRETRIEVEIllegalPath(nKu, node, host, port)
 	else:
-		print "\nRETRIEVENotFound expected NotFoundException," \
-				" but got a different failure:"
 		raise failure
 
 def testRETRIEVENotFound(nKu, node, host, port):
@@ -185,8 +175,6 @@ def testSTORELargeFailed(failure, msg, node, nKu, host, port):
 		print "%s" % msg
 		return testRETRIEVENotFound(nKu, node, host, port)
 	else:
-		print "\nSTORELarge expected BadCASKeyException," \
-				" but got a different failure:"
 		raise failure
 
 def testSTOREBadKeyLarge(nKu, node, host, port):
@@ -205,8 +193,6 @@ def testSTORESmallFailed(failure, msg, node, nKu, host, port):
 		print "%s" % msg
 		return testSTOREBadKeyLarge(nKu, node, host, port)
 	else:
-		print "\nSTORESmall expected BadCASKeyException," \
-				" but got a different failure:"
 		raise failure
 
 

@@ -60,8 +60,8 @@ class REQUEST(object):
 		if node:
 			self.node = node
 			self.config = node.config
-		self.headers = {'Fludprotocol': PROTOCOL_VERSION,
-				'User-Agent': 'FludClient'}
+		self.headers = {'Fludprotocol': fludproto_ver,
+				'User-Agent': 'FludClient 0.1'}
 
 
 class SENDGETID(REQUEST):
@@ -439,7 +439,8 @@ class SENDRETRIEVE(REQUEST):
 		self.timeoutcount = 0
 
 		self.deferred = defer.Deferred()
-		ConnectionQueue.enqueue((self, self.headers, nKu, host, port, url))
+		ConnectionQueue.enqueue((self, self.headers, nKu, host, port, 
+			url))
 
 	def startRequest(self, headers, nKu, host, port, url):
 		#print "doing RET: %s" % filename

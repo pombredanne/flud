@@ -79,6 +79,8 @@ taken to respond.
 # XXX: disallow requests originating from self.
 
 
+fludproto_ver = '0.2'
+
 challengelength = 40  # XXX: is 40 bytes sufficient?
 
 class ROOT(Resource):
@@ -139,7 +141,7 @@ class ROOT(Resource):
 
 	def setHeaders(self, request):
 		request.setHeader('Server','FludServer 0.1')
-		request.setHeader('FludProtocol', PROTOCOL_VERSION)
+		request.setHeader('FludProtocol', fludproto_ver)
 
 
 class ID(ROOT):
@@ -535,6 +537,13 @@ class RetrieveFile(object):
 			port = int(params['port'])
 			loggerretr.info("received RETRIEVE request for %s from %s:%s...",
 					request.path, host, port)
+			paths = [p for p in filekey.split(os.path.sep) if p != '']
+			if len(paths) > 1:
+				msg = "filekey contains illegal path seperator tokens."
+				loggerretr.debug("BAD_REQ: %s" % msg)
+				request.setResponseCode(http.BAD_REQUEST, 
+						"Bad Request: %s" % msg)
+				return msg
 			reqKu = {}
 			reqKu['e'] = long(params['Ku_e'])
 			reqKu['n'] = long(params['Ku_n'])
@@ -918,6 +927,13 @@ class DeleteFile(object):
 			loggerdele.debug("received DELETE request for %s from %s:%s"
 					% (request.path, host, port))
 
+			paths = [p for p in filekey.split(os.path.sep) if p != '']
+			if len(paths) > 1:
+				msg = "filekey contains illegal path seperator tokens."
+				loggerretr.debug("BAD_REQ: %s" % msg)
+				request.setResponseCode(http.BAD_REQUEST, 
+						"Bad Request: %s" % msg)
+				return msg
 			reqKu = {}
 			reqKu['e'] = long(params['Ku_e'])
 			reqKu['n'] = long(params['Ku_n'])

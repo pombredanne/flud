@@ -23,9 +23,10 @@ from Crypto.Cipher import AES
 from flud.FludCrypto import FludRSA, hashstring, generateRandom
 import flud.FludkRouting
 from flud.fencode import fencode, fdecode
-import flud.FludFileOperations as FileOps
+from flud.FludFileOperations import *
 
-import flud.protocol.ServerPrimitives as ServerPrimitives
+from FludCommUtil import *
+from FludServer import *
 
 logger = logging.getLogger("flud.local.server")
 
@@ -56,13 +57,13 @@ class LocalProtocol(basic.LineReceiver):
 		#print "got command '%s'" % command
 		if command == "PUTF":
 			logger.debug("PUTF %s", fname);
-			return FileOps.StoreFile(self.factory.node, fname).deferred
+			return StoreFile(self.factory.node, fname).deferred
 		elif command == "GETI":
 			logger.debug("GETI %s", fname);
-			return FileOps.RetrieveFile(self.factory.node, fname).deferred
+			return RetrieveFile(self.factory.node, fname).deferred
 		elif command == "GETF":
 			logger.debug("GETF %s", fname);
-			return FileOps.RetrieveFilename(self.factory.node, fname).deferred
+			return RetrieveFilename(self.factory.node, fname).deferred
 		elif command == "FNDN":
 			logger.debug("FNDN %s" % fname);
 			try: 
@@ -139,10 +140,10 @@ class LocalProtocol(basic.LineReceiver):
 			return defer.succeed(self.factory.config.master)
 		elif command == "GETM":
 			logger.debug("GETM")
-			return FileOps.RetrieveMasterIndex(self.factory.node).deferred
+			return RetrieveMasterIndex(self.factory.node).deferred
 		elif command == "PUTM":
 			logger.debug("PUTM")
-			return FileOps.UpdateMasterIndex(self.factory.node).deferred
+			return UpdateMasterIndex(self.factory.node).deferred
 		else:
 			#print "fname is '%s'" % fname
 			host = fname[:fname.find(':')]
@@ -237,12 +238,8 @@ class LocalProtocol(basic.LineReceiver):
 				nodes = []
 				for n in nodetups:
 					node = list(n)
-					if n[2] in self.factory.config.reputations:
+					if self.factory.config.reputations.has_key(n[2]):
 						node.append(self.factory.config.reputations[n[2]])
-					else:
-						node.append(0)
-					if n[2] in self.factory.config.throttled:
-						node.append(self.factory.config.throttled[n[2]])
 					else:
 						node.append(0)
 					nodes.append(tuple(node))
@@ -285,8 +282,7 @@ class LocalFactory(protocol.ServerFactory):
 		self.config = node.config
 
 	def sendChallenge(self):
-		self.challenge = fencode(generateRandom(
-				ServerPrimitives.challengelength))
+		self.challenge = fencode(generateRandom(challengelength))
 		echallenge = self.config.Ku.encrypt(self.challenge)[0]
 		echallenge = fencode(echallenge)
 		return echallenge
