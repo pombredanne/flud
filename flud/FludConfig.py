@@ -19,27 +19,23 @@ CLIENTPORTOFFSET = 500
 
 """ default mapping of trust deltas """
 class TrustDeltas:
-	INITIAL_SCORE = 1
-	POSITIVE_CAP = 500
-	NEGATIVE_CAP = -500
-	MAX_INC_PERDAY = 100 # XXX: currently unused
-	MAX_DEC_PERDAY = -250
-	# note: the rest of these are classes so that we can pass them around kind
-	# of like enums (identify what was passed by type, instead of by value)
-	class PUT_SUCCEED:
-		value = 2
-	class GET_SUCCEED:
-		value = 4
-	class VRFY_SUCCEED:
-		value = 4
-	class FNDN_FAIL:
-		value = -1
-	class PUT_FAIL:
-		value = -2
-	class GET_FAIL:
-		value = -10
-	class VRFY_FAIL:
-		value = -10
+	NODE_INITIAL_SCORE = 1
+	NODE_POSITIVE_CAP = 100
+	NODE_NEGATIVE_CAP = -100
+	PUT_SUCCEED_REWARD = 2
+	GET_SUCCEED_REWARD = 4
+	VRFY_SUCCEED_REWARD = 4
+	FNDN_FAIL_PENALTY = -1
+	PUT_FAIL_PENALTY = -2
+	GET_FAIL_PENALTY = -10
+	VRFY_FAIL_PENALTY = -10
+
+""" failure codes for bad node tracking """
+class PeerFailures:
+	PUT = 1
+	GET = 2
+	VRFY = 3
+	FNDN = 4
 
 class FludDebugLogFilter(logging.Filter):
 	"""
@@ -112,7 +108,7 @@ class FludConfig:
 		self.port = -1
 		self.reputations = {}
 		self.nodes = {}
-		self.throttled = {}  # XXX: should persist this to config file
+		self.badnodes = {}
 
 		try:
 			self.fludhome = os.environ['FLUDHOME']
@@ -488,45 +484,41 @@ class FludConfig:
 				self.routing.replacementCache.insertNode(
 						(host, int(port), long(nodeID, 16),
 							Ku.exportPublicKey()['n']))
-			self.reputations[long(nodeID,16)] = TrustDeltas.INITIAL_SCORE
+			self.reputations[long(nodeID,16)] = TrustDeltas.NODE_INITIAL_SCORE
 			# XXX: no management of reputations size: need to manage as a cache
 	
-	def modifyReputation(self, nodeID, reason):
+	def modifyReputation(self, nodeID, delta, markbadreason=None):
 		"""
-		change reputation of nodeID by reason.value
+		change reputation of nodeID by delta
 		"""
-		logger.info("modify %s %s" % (nodeID, reason.value))
+		logger.info("modify %s %s" % (nodeID, delta))
 		if isinstance(nodeID, str):
 			nodeID = long(nodeID,16)
 		if not self.reputations.has_key(nodeID):
-			self.reputations[nodeID] = TrustDeltas.INITIAL_SCORE
+			self.reputations[nodeID] = TrustDeltas.NODE_INITIAL_SCORE
 			# XXX: no management of reputations size: need to manage as a cache
-		self.reputations[nodeID] += reason.value
+		self.reputations[nodeID] += delta
 		logger.debug("reputation for %d now %d", nodeID, 
 				self.reputations[nodeID])
-		curtime = int(time.time())
-		if reason.value < 0:
-			self.throttleNode(nodeID, reason, curtime)
-		elif nodeID in self.throttled and self.throttled[nodeID] < curtime:
-			self.throttled.pop(nodeID)
+		if markbadreason:
+			self.updateBadNodes(nodeID, markbadreason)
 
-	def throttleNode(self, nodeID, reason, curtime=None):
-		"""
-		puts a node in the throttle list.
-		"""
-		if not curtime:
-			curtime = int(time.time())
-		pause = curtime \
-				+ (reason.value * 24 * 60 * 60) / TrustDeltas.MAX_DEC_PERDAY
-		self.throttled[nodeID] = pause 
-
-	def getPreferredNodes(self, num=None, exclude=None, throttle=False):
+	def updateBadNodes(self, nodeID, reason):
+		if self.badnodes.has_key(nodeID):
+			if self.badnodes[nodeID].has_key(reason):
+				pass # let it age
+			else:
+				self.badnodes[nodeID][reason] = time.time()
+		else:
+			self.badnodes[nodeID] = {}
+			self.badnodes[nodeID][reason] = time.time()
+	
+	def getOrderedNodes(self, num=None, exclude=None):
 		"""
 		Get nodes ordered by reputation.  If num is passed in, return the first
 		'num' nodes, otherwise all.  If exclude list is passed in, try to
 		return nodes not on this list (but do return some excluded if nodes are
-		exhausted, i.e., there aren't num nodes available).  If throttle
-		(default), do not return any nodes which are currently throttled.
+		exhausted, i.e., there aren't num nodes available).
 		"""
 		# XXX: O(n) each time this is called.  Better performance if we
 		# maintain sorted list when modified (modifyReputation, addNode), at a
@@ -534,36 +526,14 @@ class FludConfig:
 		items = self.reputations.items()
 		numitems = len(items)
 		logger.debug("%d items in reps" % numitems)
-		if throttle:
-
-			now = int(time.time())
-			for t in self.throttled:
-				if self.throttled[t] < now:
-					self.throttled.pop(t)
-
-			if exclude:
-				items = [(v,k) for (k,v) in items if k not in throttle and 
-						k not in exclude]
-				if num and len(items) < num and numitems >= num:
-					exitems = [(v,k) for (k,v) in items if k not in throttle 
-							and k in exclude]
-					items += exitems[num-len(item):]
-				logger.debug("%d items now in reps" % len(items))
-			else:
-				items = [(v,k) for (k,v) in items if k not in throttle]
-		
+		if exclude:
+			items = [(v,k) for (k,v) in items if k not in exclude]
+			if num and len(items) < num and numitems >= num:
+				exitems = [(v,k) for (k,v) in items if k in exclude]
+				items += exitems[num-len(item):]
+			logger.debug("%d items now in reps" % len(items))
 		else:
-			# XXX: refactor; 'if exclude else' is same as above, but without
-			# the 'if k not in throttle' bits
-			if exclude:
-				items = [(v,k) for (k,v) in items if k not in exclude]
-				if num and len(items) < num and numitems >= num:
-					exitems = [(v,k) for (k,v) in items if k in exclude]
-					items += exitems[num-len(item):]
-				logger.debug("%d items now in reps" % len(items))
-			else:
-				items = [(v,k) for (k,v) in items]
-
+			items = [(v,k) for (k,v) in items]
 		items.sort()
 		items.reverse()
 		items = [(k,v) for (v,k) in items]
